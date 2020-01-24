@@ -1,0 +1,18 @@
+[package]
+name = "parity-secretstore-http-service"
+version = "1.0.0"
+license = "GPL-3.0"
+authors = ["Parity Technologies <admin@parity.io>"]
+edition = "2018"
+
+[dependencies]
+hyper = "0.13"
+jsonrpc-server-utils = "14.0"
+log = "0.4"
+parity-secretstore-primitives = { path = "../secret-store/primitives" }
+percent-encoding = "2.1"
+serde = "1.0"
+serde_json = "1.0"
+
+[dev-dependencies]
+assert_matches = "1.3"
