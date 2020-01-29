@@ -64,10 +64,10 @@ pub struct DecomposedRequest {
 }
 
 /// Start listening HTTP requests on given address.
-pub async fn start_service<KeyServer: KeyServer>(
+pub async fn start_service<KS: KeyServer>(
 	listen_address: &str,
 	listen_port: u16,
-	key_server: Arc<KeyServer>,
+	key_server: Arc<KS>,
 	cors: CorsDomains,
 ) -> Result<(), Error> {
 	let cors = Arc::new(cors);
@@ -93,9 +93,9 @@ pub async fn start_service<KeyServer: KeyServer>(
 }
 
 /// Serve single HTTP request.
-async fn serve_http_request<KeyServer: KeyServer>(
+async fn serve_http_request<KS: KeyServer>(
 	http_request: Request<Body>,
-	key_server: Arc<KeyServer>,
+	key_server: Arc<KS>,
 	cors_domains: Arc<CorsDomains>,
 ) -> Result<Response<Body>, hyper::Error> {
 	let decomposed_request = match decompose_http_request(http_request).await {
@@ -133,6 +133,7 @@ async fn serve_http_request<KeyServer: KeyServer>(
 				key_server
 					.generate_key(key_id, requester, threshold)
 					.await
+					.map(|artifacts| artifacts.key)
 					.map_err(log_secret_store_error),
 			)),
 		ServiceTask::RetrieveServerKey(key_id, requester) =>
@@ -142,9 +143,10 @@ async fn serve_http_request<KeyServer: KeyServer>(
 				key_server
 					.restore_key_public(
 						key_id,
-						requester.expect("HTTP requests without requester are considered invalid; qed"),
+						requester,
 					)
 					.await
+					.map(|artifacts| artifacts.key)
 					.map_err(log_secret_store_error),
 			)),
 		ServiceTask::GenerateDocumentKey(key_id, requester, threshold) =>
@@ -181,7 +183,12 @@ async fn serve_http_request<KeyServer: KeyServer>(
 				key_server
 					.restore_document_key_shadow(key_id, requester)
 					.await
-					.map_err(log_secret_store_error),
+					.map_err(log_secret_store_error)
+					.map(|artifacts| EncryptedDocumentKeyShadow {
+						decrypted_secret: artifacts.decrypted_secret,
+						common_point: artifacts.common_point,
+						decrypt_shadows: artifacts.decrypt_shadows,
+					}),
 			)),
 		ServiceTask::SchnorrSignMessage(key_id, requester, message_hash) =>
 			Ok(return_message_signature(

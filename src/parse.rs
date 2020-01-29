@@ -21,7 +21,9 @@ use crate::{DecomposedRequest, Error};
 
 pub fn parse_http_request(request: &DecomposedRequest) -> Result<ServiceTask, Error> {
 	let uri_path = request.uri.path().to_string();
-	let uri_path = percent_encoding::percent_decode(uri_path.as_bytes()).decode_utf8().map_err(|_| Error::InvalidRequest)?;
+	let uri_path = percent_encoding::percent_decode(uri_path.as_bytes())
+		.decode_utf8()
+		.map_err(|_| Error::InvalidRequest)?;
 
 	let path: Vec<String> = uri_path.trim_start_matches('/').split('/').map(Into::into).collect();
 	if path.len() == 0 {
