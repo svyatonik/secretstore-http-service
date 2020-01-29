@@ -9,7 +9,7 @@ edition = "2018"
 hyper = "0.13"
 jsonrpc-server-utils = "14.0"
 log = "0.4"
-parity-secretstore-primitives = { path = "../primitives" }
+parity-secretstore-primitives = { git = "https://github.com/svyatonik/secretstore-primitives.git" }
 percent-encoding = "2.1"
 serde = "1.0"
 serde_json = "1.0"
