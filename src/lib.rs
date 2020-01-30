@@ -14,7 +14,8 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity Secret Store.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
+use futures::future::{TryFutureExt, ready};
 use hyper::{
 	Body, Method, Request, Response, Server, StatusCode, Uri,
 	header::{self, HeaderValue},
@@ -24,9 +25,9 @@ use jsonrpc_server_utils::cors::{self, AllowCors, AccessControlAllowOrigin};
 use log::error;
 use serde::Serialize;
 use parity_secretstore_primitives::{
-	ServerKey, EncryptedDocumentKey, EncryptedDocumentKeyShadow,
+	Public, ecies_encrypt,
 	error::Error as SecretStoreError,
-	key_server::KeyServer,
+	key_server::{DocumentKeyShadowRetrievalArtifacts, KeyServer},
 	serialization::{SerializableBytes, SerializablePublic, SerializableEncryptedDocumentKeyShadow},
 	service::ServiceTask,
 };
@@ -127,7 +128,7 @@ async fn serve_http_request<KS: KeyServer>(
 
 	match service_task {
 		ServiceTask::GenerateServerKey(key_id, requester, threshold) =>
-			Ok(return_server_key(
+			Ok(return_unencrypted_server_key(
 				&decomposed_request,
 				allow_cors,
 				key_server
@@ -137,7 +138,7 @@ async fn serve_http_request<KS: KeyServer>(
 					.map_err(log_secret_store_error),
 			)),
 		ServiceTask::RetrieveServerKey(key_id, requester) =>
-			Ok(return_server_key(
+			Ok(return_unencrypted_server_key(
 				&decomposed_request,
 				allow_cors,
 				key_server
@@ -150,14 +151,20 @@ async fn serve_http_request<KS: KeyServer>(
 					.map_err(log_secret_store_error),
 			)),
 		ServiceTask::GenerateDocumentKey(key_id, requester, threshold) =>
-			Ok(return_document_key(
+			Ok(return_encrypted_document_key(
 				&decomposed_request,
 				allow_cors,
-				key_server
-					.generate_document_key(key_id, requester, threshold)
-					.await
+				ready(requester.public(&key_id))
+					.and_then(|requester_public|
+						key_server
+							.generate_document_key(key_id, requester, threshold)
+							.and_then(move |artifacts| ready(ecies_encrypt(
+								&requester_public,
+								artifacts.document_key.as_bytes(),
+							)))
+					)
 					.map_err(log_secret_store_error),
-			)),
+			).await),
 		ServiceTask::StoreDocumentKey(key_id, requester, common_point, encrypted_point) =>
 			Ok(return_empty(
 				&decomposed_request,
@@ -168,14 +175,20 @@ async fn serve_http_request<KS: KeyServer>(
 					.map_err(log_secret_store_error),
 			)),
 		ServiceTask::RetrieveDocumentKey(key_id, requester) =>
-			Ok(return_document_key(
+			Ok(return_encrypted_document_key(
 				&decomposed_request,
 				allow_cors,
-				key_server
-					.restore_document_key(key_id, requester)
-					.await
-					.map_err(log_secret_store_error),
-			)),
+				ready(requester.public(&key_id))
+					.and_then(|requester_public|
+						key_server
+							.restore_document_key(key_id, requester)
+							.and_then(move |artifacts| ready(ecies_encrypt(
+								&requester_public,
+								artifacts.document_key.as_bytes(),
+							)))
+					)
+					.map_err(log_secret_store_error)
+			).await),
 		ServiceTask::RetrieveShadowDocumentKey(key_id, requester) =>
 			Ok(return_document_key_shadow(
 				&decomposed_request,
@@ -183,31 +196,44 @@ async fn serve_http_request<KS: KeyServer>(
 				key_server
 					.restore_document_key_shadow(key_id, requester)
 					.await
-					.map_err(log_secret_store_error)
-					.map(|artifacts| EncryptedDocumentKeyShadow {
-						decrypted_secret: artifacts.decrypted_secret,
-						common_point: artifacts.common_point,
-						decrypt_shadows: artifacts.decrypt_shadows,
-					}),
+					.map_err(log_secret_store_error),
 			)),
 		ServiceTask::SchnorrSignMessage(key_id, requester, message_hash) =>
-			Ok(return_message_signature(
+			Ok(return_encrypted_message_signature(
 				&decomposed_request,
 				allow_cors,
-				key_server
-					.sign_message_schnorr(key_id, requester, message_hash)
-					.await
-					.map_err(log_secret_store_error),
-			)),
+				ready(requester.public(&key_id))
+					.and_then(|requester_public|
+						key_server
+							.sign_message_schnorr(key_id, requester, message_hash)
+							.and_then(|artifacts| {
+								let mut combined_signature = [0; 64];
+								combined_signature[..32].clone_from_slice(artifacts.signature_c.as_bytes());
+								combined_signature[32..].clone_from_slice(artifacts.signature_s.as_bytes());
+								ready(Ok(combined_signature))
+							})
+							.and_then(move |plain_signature| ready(ecies_encrypt(
+								&requester_public,
+								&plain_signature,
+							)))
+					)
+					.map_err(log_secret_store_error)
+			).await),
 		ServiceTask::EcdsaSignMessage(key_id, requester, message_hash) =>
-			Ok(return_message_signature(
+			Ok(return_encrypted_message_signature(
 				&decomposed_request,
 				allow_cors,
-				key_server
-					.sign_message_ecdsa(key_id, requester, message_hash)
-					.await
-					.map_err(log_secret_store_error),
-			)),
+				ready(requester.public(&key_id))
+					.and_then(|requester_public|
+						key_server
+							.sign_message_ecdsa(key_id, requester, message_hash)
+							.and_then(move |artifacts| ready(ecies_encrypt(
+								&requester_public,
+								&*artifacts.signature,
+							)))
+					)
+					.map_err(log_secret_store_error)
+			).await),
 		ServiceTask::ChangeServersSet(old_set_signature, new_set_signature, new_set) =>
 			Ok(return_empty(
 				&decomposed_request,
@@ -293,45 +319,57 @@ fn return_empty(
 	return_bytes::<i32>(request, allow_cors, empty.map(|_| None))
 }
 
-fn return_server_key(
+fn return_unencrypted_server_key(
 	request: &DecomposedRequest,
 	allow_cors: AllowCors<AccessControlAllowOrigin>,
-	result: Result<ServerKey, Error>,
+	result: Result<Public, Error>,
 ) -> Response<Body> {
 	return_bytes(request, allow_cors, result.map(|key| Some(SerializablePublic(key))))
 }
 
-fn return_document_key(
+async fn return_encrypted_document_key(
 	request: &DecomposedRequest,
 	allow_cors: AllowCors<AccessControlAllowOrigin>,
-	document_key: Result<EncryptedDocumentKey, Error>,
+	encrypted_document_key: impl Future<Output=Result<Vec<u8>, Error>>,
 ) -> Response<Body> {
-	return_bytes(request, allow_cors, document_key.map(|k| Some(SerializableBytes(k))))
+	return_bytes(
+		request,
+		allow_cors,
+		encrypted_document_key
+			.await
+			.map(|key| Some(SerializableBytes(key))),
+	)
 }
 
 fn return_document_key_shadow(
 	request: &DecomposedRequest,
 	allow_cors: AllowCors<AccessControlAllowOrigin>,
-	document_key_shadow: Result<EncryptedDocumentKeyShadow, Error>,
+	document_key_shadow: Result<DocumentKeyShadowRetrievalArtifacts, Error>,
 ) -> Response<Body> {
 	return_bytes(request, allow_cors, document_key_shadow.map(|k| Some(SerializableEncryptedDocumentKeyShadow {
-		decrypted_secret: k.decrypted_secret.into(),
-		common_point: k.common_point.expect("always filled when requesting document_key_shadow; qed").into(),
+		decrypted_secret: k.encrypted_document_key.into(),
+		common_point: k.common_point.into(),
 		decrypt_shadows: k
-			.decrypt_shadows
-			.expect("always filled when requesting document_key_shadow; qed")
-			.into_iter()
+			.participants_coefficients
+			.values()
+			.cloned()
 			.map(Into::into)
 			.collect(),
 	})))
 }
 
-fn return_message_signature(
+async fn return_encrypted_message_signature(
 	request: &DecomposedRequest,
 	allow_cors: AllowCors<AccessControlAllowOrigin>,
-	signature: Result<EncryptedDocumentKey, Error>,
+	encrypted_signature: impl Future<Output=Result<Vec<u8>, Error>>,
 ) -> Response<Body> {
-	return_bytes(request, allow_cors, signature.map(|s| Some(SerializableBytes(s))))
+	return_bytes(
+		request,
+		allow_cors,
+		encrypted_signature
+			.await
+			.map(|s| Some(SerializableBytes(s))),
+	)
 }
 
 fn return_bytes<T: Serialize>(
