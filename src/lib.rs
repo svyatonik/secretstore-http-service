@@ -15,7 +15,7 @@
 // along with Parity Secret Store.  If not, see <http://www.gnu.org/licenses/>.
 
 use std::{future::Future, sync::Arc};
-use futures::future::{TryFutureExt, ready};
+use futures::future::{FutureExt, TryFutureExt, ready};
 use hyper::{
 	Body, Method, Request, Response, Server, StatusCode, Uri,
 	header::{self, HeaderValue},
@@ -27,7 +27,7 @@ use serde::Serialize;
 use parity_secretstore_primitives::{
 	Public, ecies_encrypt,
 	error::Error as SecretStoreError,
-	key_server::{DocumentKeyShadowRetrievalArtifacts, KeyServer},
+	key_server::{DocumentKeyStoreArtifacts, DocumentKeyShadowRetrievalArtifacts, KeyServer},
 	serialization::{SerializableBytes, SerializablePublic, SerializableEncryptedDocumentKeyShadow},
 	service::ServiceTask,
 };
@@ -157,7 +157,8 @@ async fn serve_http_request<KS: KeyServer>(
 				ready(requester.public(&key_id))
 					.and_then(|requester_public|
 						key_server
-							.generate_document_key(key_id, requester, threshold)
+							.generate_document_key(None, key_id, requester, threshold)
+							.map(Into::into)
 							.and_then(move |artifacts| ready(ecies_encrypt(
 								&requester_public,
 								artifacts.document_key.as_bytes(),
@@ -170,8 +171,10 @@ async fn serve_http_request<KS: KeyServer>(
 				&decomposed_request,
 				allow_cors,
 				key_server
-					.store_document_key(key_id, requester, common_point, encrypted_point)
+					.store_document_key(None, key_id, requester, common_point, encrypted_point)
 					.await
+					.map(Into::into)
+					.map(|_: DocumentKeyStoreArtifacts| ())
 					.map_err(log_secret_store_error),
 			)),
 		ServiceTask::RetrieveDocumentKey(key_id, requester) =>
@@ -181,7 +184,8 @@ async fn serve_http_request<KS: KeyServer>(
 				ready(requester.public(&key_id))
 					.and_then(|requester_public|
 						key_server
-							.restore_document_key(key_id, requester)
+							.restore_document_key(None, key_id, requester)
+							.map(Into::into)
 							.and_then(move |artifacts| ready(ecies_encrypt(
 								&requester_public,
 								artifacts.document_key.as_bytes(),
@@ -194,8 +198,9 @@ async fn serve_http_request<KS: KeyServer>(
 				&decomposed_request,
 				allow_cors,
 				key_server
-					.restore_document_key_shadow(key_id, requester)
+					.restore_document_key_shadow(None, key_id, requester)
 					.await
+					.map(Into::into)
 					.map_err(log_secret_store_error),
 			)),
 		ServiceTask::SchnorrSignMessage(key_id, requester, message_hash) =>
@@ -205,7 +210,8 @@ async fn serve_http_request<KS: KeyServer>(
 				ready(requester.public(&key_id))
 					.and_then(|requester_public|
 						key_server
-							.sign_message_schnorr(key_id, requester, message_hash)
+							.sign_message_schnorr(None, key_id, requester, message_hash)
+							.map(Into::into)
 							.and_then(|artifacts| {
 								let mut combined_signature = [0; 64];
 								combined_signature[..32].clone_from_slice(artifacts.signature_c.as_bytes());
@@ -226,7 +232,8 @@ async fn serve_http_request<KS: KeyServer>(
 				ready(requester.public(&key_id))
 					.and_then(|requester_public|
 						key_server
-							.sign_message_ecdsa(key_id, requester, message_hash)
+							.sign_message_ecdsa(None, key_id, requester, message_hash)
+							.map(Into::into)
 							.and_then(move |artifacts| ready(ecies_encrypt(
 								&requester_public,
 								&*artifacts.signature,
@@ -239,8 +246,9 @@ async fn serve_http_request<KS: KeyServer>(
 				&decomposed_request,
 				allow_cors,
 				key_server
-					.change_servers_set(old_set_signature, new_set_signature, new_set)
+					.change_servers_set(None, old_set_signature, new_set_signature, new_set)
 					.await
+					.map(Into::into)
 					.map_err(log_secret_store_error),
 			)),
 	}
