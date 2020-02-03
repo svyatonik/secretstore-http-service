@@ -132,7 +132,7 @@ async fn serve_http_request<KS: KeyServer>(
 				&decomposed_request,
 				allow_cors,
 				key_server
-					.generate_key(key_id, requester, threshold)
+					.generate_key(None, key_id, requester, threshold)
 					.await
 					.map(|artifacts| artifacts.key)
 					.map_err(log_secret_store_error),
@@ -143,6 +143,7 @@ async fn serve_http_request<KS: KeyServer>(
 				allow_cors,
 				key_server
 					.restore_key_public(
+						None,
 						key_id,
 						requester,
 					)
